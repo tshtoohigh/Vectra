@@ -1,0 +1,12 @@
+export { default as LandingNav } from './LandingNav.jsx';
+export { default as Hero } from './Hero.jsx';
+export { default as ProductMockup } from './ProductMockup.jsx';
+export { default as SocialProof } from './SocialProof.jsx';
+export { default as Features } from './Features.jsx';
+export { default as HowItWorks } from './HowItWorks.jsx';
+export { default as AiSpotlight } from './AiSpotlight.jsx';
+export { default as AwsArchitecture } from './AwsArchitecture.jsx';
+export { default as Testimonials } from './Testimonials.jsx';
+export { default as Faq } from './Faq.jsx';
+export { default as FinalCta } from './FinalCta.jsx';
+export { default as LandingFooter } from './LandingFooter.jsx';
