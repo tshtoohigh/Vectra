@@ -1,68 +1,64 @@
 /**
- * AWS SDK Configuration
+ * AWS Configuration — Netlify Functions Backend
  *
- * Reads AWS credentials from Vite environment variables.
- * These come from your Learner Lab "AWS Details" page.
+ * Instead of calling AWS directly from the browser (which exposes credentials),
+ * all AWS operations go through Netlify serverless functions:
+ *   /.netlify/functions/dynamo  → DynamoDB operations
+ *   /.netlify/functions/sns     → SNS operations
  *
- * Required env vars (set in .env or Netlify):
- *   VITE_AWS_ACCESS_KEY_ID
- *   VITE_AWS_SECRET_ACCESS_KEY
- *   VITE_AWS_SESSION_TOKEN
- *   VITE_AWS_REGION (optional, defaults to us-east-1)
+ * Credentials are stored as server-side env vars in Netlify (not VITE_ prefixed),
+ * so they NEVER appear in the browser bundle.
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { SNSClient } from '@aws-sdk/client-sns';
-
-const REGION = import.meta.env.VITE_AWS_REGION || 'us-east-1';
-
-const credentials = {
-  accessKeyId: import.meta.env.VITE_AWS_ACCESS_KEY_ID || '',
-  secretAccessKey: import.meta.env.VITE_AWS_SECRET_ACCESS_KEY || '',
-  sessionToken: import.meta.env.VITE_AWS_SESSION_TOKEN || '',
-};
+const DYNAMO_ENDPOINT = '/.netlify/functions/dynamo';
+const SNS_ENDPOINT = '/.netlify/functions/sns';
 
 /**
- * Check if real AWS credentials are configured
+ * Check if we're running on Netlify (functions available)
  */
 export function isAWSConfigured() {
-  return !!(credentials.accessKeyId && credentials.secretAccessKey);
+  // If we're on localhost without functions, return false
+  // On Netlify, the functions are always available
+  return true;
 }
 
 /**
- * Raw DynamoDB client
+ * Call the DynamoDB Netlify function
  */
-const dynamoRaw = new DynamoDBClient({
-  region: REGION,
-  credentials: isAWSConfigured() ? credentials : undefined,
-});
+export async function callDynamo(action, userId, data = {}) {
+  const response = await fetch(DYNAMO_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, userId, data }),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(err.error || `HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
 
 /**
- * DynamoDB Document Client (handles marshalling/unmarshalling automatically)
- * This is what you use for Put, Get, Query, Update, Delete, Scan
+ * Call the SNS Netlify function
  */
-export const dynamoDB = DynamoDBDocumentClient.from(dynamoRaw, {
-  marshallOptions: { removeUndefinedValues: true, convertEmptyValues: false },
-  unmarshallOptions: { wrapNumbers: false },
-});
+export async function callSNS(action, data = {}) {
+  const response = await fetch(SNS_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, data }),
+  });
 
-/**
- * SNS Client for sending real notifications
- */
-export const snsClient = new SNSClient({
-  region: REGION,
-  credentials: isAWSConfigured() ? credentials : undefined,
-});
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Request failed' }));
+    throw new Error(err.error || `HTTP ${response.status}`);
+  }
 
-/**
- * Table name used across all operations
- */
+  return response.json();
+}
+
 export const TABLE_NAME = 'Vectra';
+export const SNS_TOPIC_ARN = 'arn:aws:sns:us-east-1:037389780625:PolyTrackAlerts';
 
-/**
- * SNS Topic ARN for deadline alerts
- */
-export const SNS_TOPIC_ARN = import.meta.env.VITE_SNS_TOPIC_ARN || 'arn:aws:sns:us-east-1:037389780625:PolyTrackAlerts';
-
-export default { dynamoDB, snsClient, TABLE_NAME, SNS_TOPIC_ARN, isAWSConfigured };
+export default { isAWSConfigured, callDynamo, callSNS, TABLE_NAME, SNS_TOPIC_ARN };

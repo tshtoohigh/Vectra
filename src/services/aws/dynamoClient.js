@@ -1,363 +1,197 @@
 /**
- * Amazon DynamoDB Data Layer — REAL AWS SDK Implementation
+ * DynamoDB Client — Calls Netlify Functions (server-side)
  *
- * This module makes REAL calls to DynamoDB using the AWS SDK.
- * No mocks, no localStorage (except as fallback when credentials aren't set).
+ * All DynamoDB operations go through /.netlify/functions/dynamo
+ * This keeps AWS credentials on the server, never in the browser.
  *
- * Table: Vectra
- * Key Schema:
- *   PK (String, HASH)  — e.g. USER#john@email.com or USER#demo_user
- *   SK (String, RANGE) — e.g. TASK#task_abc123 or PROFILE
- *
- * Operations:
- *   - QueryCommand:  get all tasks for a user
- *   - PutCommand:    create/overwrite a task
- *   - UpdateCommand: update specific fields
- *   - DeleteCommand: remove a task
- *   - GetCommand:    get a single item
- *   - ScanCommand:   scan all items (for deadline checking)
+ * The Netlify function uses these DynamoDB operations:
+ *   QueryCommand, PutCommand, UpdateCommand, DeleteCommand, GetCommand
  */
 
-import {
-  PutCommand,
-  GetCommand,
-  QueryCommand,
-  UpdateCommand,
-  DeleteCommand,
-  ScanCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { dynamoDB, TABLE_NAME, isAWSConfigured } from './awsConfig.js';
+import { callDynamo, isAWSConfigured } from './awsConfig.js';
 
 export const DynamoClient = {
-  // ═══════════════════════════════════════════════════════════════════
-  // TASK OPERATIONS (real DynamoDB calls)
-  // ═══════════════════════════════════════════════════════════════════
-
   /**
    * Get all tasks for a user
-   * DynamoDB Operation: Query with KeyConditionExpression
+   * Server: DynamoDB QueryCommand
    */
   async getTasks(userId) {
-    if (!isAWSConfigured()) return _localGetTasks(userId);
-
-    const result = await dynamoDB.send(new QueryCommand({
-      TableName: TABLE_NAME,
-      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
-      ExpressionAttributeValues: {
-        ':pk': `USER#${userId}`,
-        ':sk': 'TASK#',
-      },
-    }));
-
-    console.log(`[DynamoDB] Query: ${result.Items?.length || 0} tasks for USER#${userId}`);
-    return (result.Items || []).map(stripKeys);
+    if (!isAWSConfigured()) return _local('getTasks', userId);
+    try {
+      const result = await callDynamo('getTasks', userId);
+      console.log(`[DynamoDB] QueryCommand: ${result.tasks?.length || 0} tasks`);
+      return result.tasks || [];
+    } catch (err) {
+      console.warn('[DynamoDB] getTasks failed:', err.message);
+      return _local('getTasks', userId);
+    }
   },
 
   /**
-   * Create a new task
-   * DynamoDB Operation: PutCommand
+   * Create a task
+   * Server: DynamoDB PutCommand
    */
   async putTask(userId, task) {
-    if (!isAWSConfigured()) return _localPutTask(userId, task);
-
-    const item = {
-      PK: `USER#${userId}`,
-      SK: `TASK#${task.id}`,
-      ...task,
-    };
-
-    await dynamoDB.send(new PutCommand({
-      TableName: TABLE_NAME,
-      Item: item,
-    }));
-
-    console.log(`[DynamoDB] Put: TASK#${task.id} for USER#${userId}`);
-    return task;
+    if (!isAWSConfigured()) return _local('putTask', userId, task);
+    try {
+      const result = await callDynamo('createTask', userId, task);
+      console.log(`[DynamoDB] PutCommand: TASK#${task.id}`);
+      return result.task || task;
+    } catch (err) {
+      console.warn('[DynamoDB] putTask failed:', err.message);
+      return _local('putTask', userId, task);
+    }
   },
 
   /**
-   * Update a task's fields
-   * DynamoDB Operation: UpdateCommand with dynamic expressions
+   * Update a task
+   * Server: DynamoDB UpdateCommand
    */
   async updateTask(userId, taskId, updates) {
-    if (!isAWSConfigured()) return _localUpdateTask(userId, taskId, updates);
-
-    const parts = [];
-    const names = {};
-    const values = {};
-
-    Object.entries(updates).forEach(([key, val]) => {
-      if (key === 'id' || key === 'PK' || key === 'SK') return;
-      const attr = `#${key}`;
-      const valKey = `:${key}`;
-      parts.push(`${attr} = ${valKey}`);
-      names[attr] = key;
-      values[valKey] = val;
-    });
-
-    // Always update timestamp
-    parts.push('#updatedAt = :updatedAt');
-    names['#updatedAt'] = 'updatedAt';
-    values[':updatedAt'] = new Date().toISOString();
-
-    if (parts.length === 0) return updates;
-
-    const result = await dynamoDB.send(new UpdateCommand({
-      TableName: TABLE_NAME,
-      Key: { PK: `USER#${userId}`, SK: `TASK#${taskId}` },
-      UpdateExpression: 'SET ' + parts.join(', '),
-      ExpressionAttributeNames: names,
-      ExpressionAttributeValues: values,
-      ReturnValues: 'ALL_NEW',
-    }));
-
-    console.log(`[DynamoDB] Update: TASK#${taskId}`);
-    return stripKeys(result.Attributes || {});
+    if (!isAWSConfigured()) return _local('updateTask', userId, { taskId, updates });
+    try {
+      const result = await callDynamo('updateTask', userId, { taskId, updates });
+      console.log(`[DynamoDB] UpdateCommand: TASK#${taskId}`);
+      return result.task || updates;
+    } catch (err) {
+      console.warn('[DynamoDB] updateTask failed:', err.message);
+      return _local('updateTask', userId, { taskId, updates });
+    }
   },
 
   /**
    * Delete a task
-   * DynamoDB Operation: DeleteCommand
+   * Server: DynamoDB DeleteCommand
    */
   async deleteTask(userId, taskId) {
-    if (!isAWSConfigured()) return _localDeleteTask(userId, taskId);
-
-    await dynamoDB.send(new DeleteCommand({
-      TableName: TABLE_NAME,
-      Key: { PK: `USER#${userId}`, SK: `TASK#${taskId}` },
-    }));
-
-    console.log(`[DynamoDB] Delete: TASK#${taskId}`);
+    if (!isAWSConfigured()) return _local('deleteTask', userId, { taskId });
+    try {
+      await callDynamo('deleteTask', userId, { taskId });
+      console.log(`[DynamoDB] DeleteCommand: TASK#${taskId}`);
+    } catch (err) {
+      console.warn('[DynamoDB] deleteTask failed:', err.message);
+      _local('deleteTask', userId, { taskId });
+    }
   },
 
   /**
    * Get a single task
-   * DynamoDB Operation: GetCommand
+   * Server: DynamoDB GetCommand
    */
   async getTask(userId, taskId) {
     if (!isAWSConfigured()) return null;
-
-    const result = await dynamoDB.send(new GetCommand({
-      TableName: TABLE_NAME,
-      Key: { PK: `USER#${userId}`, SK: `TASK#${taskId}` },
-    }));
-
-    return result.Item ? stripKeys(result.Item) : null;
+    try {
+      const result = await callDynamo('getTask', userId, { taskId });
+      return result.task || null;
+    } catch (err) {
+      console.warn('[DynamoDB] getTask failed:', err.message);
+      return null;
+    }
   },
 
-  // ═══════════════════════════════════════════════════════════════════
-  // USER PROFILE OPERATIONS
-  // ═══════════════════════════════════════════════════════════════════
-
   /**
-   * Get user profile from DynamoDB
-   * DynamoDB Operation: GetCommand with SK = PROFILE
+   * Get user profile
+   * Server: DynamoDB GetCommand
    */
   async getProfile(userId) {
-    if (!isAWSConfigured()) return _localGetProfile(userId);
+    if (!isAWSConfigured()) return _localProfile('get', userId);
+    try {
+      const result = await callDynamo('getProfile', userId);
+      console.log(`[DynamoDB] GetCommand: PROFILE`);
+      return result.profile || null;
+    } catch (err) {
+      console.warn('[DynamoDB] getProfile failed:', err.message);
+      return _localProfile('get', userId);
+    }
+  },
 
-    const result = await dynamoDB.send(new GetCommand({
-      TableName: TABLE_NAME,
-      Key: { PK: `USER#${userId}`, SK: 'PROFILE' },
-    }));
-
-    console.log(`[DynamoDB] GetProfile: USER#${userId} → ${result.Item ? 'found' : 'not found'}`);
-    return result.Item ? stripKeys(result.Item) : null;
+  async getProfileByEmail(email) {
+    return this.getProfile(email);
   },
 
   /**
-   * Save/update user profile in DynamoDB
-   * DynamoDB Operation: PutCommand with SK = PROFILE
+   * Save user profile
+   * Server: DynamoDB PutCommand
    */
   async putProfile(userId, profile) {
-    if (!isAWSConfigured()) return _localPutProfile(userId, profile);
-
-    const item = {
-      PK: `USER#${userId}`,
-      SK: 'PROFILE',
-      ...profile,
-      updatedAt: new Date().toISOString(),
-    };
-
-    await dynamoDB.send(new PutCommand({
-      TableName: TABLE_NAME,
-      Item: item,
-    }));
-
-    console.log(`[DynamoDB] PutProfile: USER#${userId}`);
-    return profile;
+    if (!isAWSConfigured()) return _localProfile('put', userId, profile);
+    try {
+      await callDynamo('putProfile', userId, profile);
+      console.log(`[DynamoDB] PutCommand: PROFILE`);
+      return profile;
+    } catch (err) {
+      console.warn('[DynamoDB] putProfile failed:', err.message);
+      return _localProfile('put', userId, profile);
+    }
   },
 
   /**
-   * Find a user profile by email (for login)
-   * DynamoDB Operation: Query with begins_with on SK = PROFILE
-   * Since email IS the userId in our system, we query directly
-   */
-  async getProfileByEmail(email) {
-    if (!isAWSConfigured()) return _localGetProfileByEmail(email);
-
-    const result = await dynamoDB.send(new GetCommand({
-      TableName: TABLE_NAME,
-      Key: { PK: `USER#${email}`, SK: 'PROFILE' },
-    }));
-
-    return result.Item ? stripKeys(result.Item) : null;
-  },
-
-  // ═══════════════════════════════════════════════════════════════════
-  // MODULE OPERATIONS
-  // ═══════════════════════════════════════════════════════════════════
-
-  /**
-   * Get all modules for a user
-   * DynamoDB Operation: Query with SK prefix MODULE#
+   * Get all modules
+   * Server: DynamoDB QueryCommand
    */
   async getModules(userId) {
-    if (!isAWSConfigured()) return _localGetModules(userId);
-
-    const result = await dynamoDB.send(new QueryCommand({
-      TableName: TABLE_NAME,
-      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
-      ExpressionAttributeValues: {
-        ':pk': `USER#${userId}`,
-        ':sk': 'MODULE#',
-      },
-    }));
-
-    console.log(`[DynamoDB] Query: ${result.Items?.length || 0} modules for USER#${userId}`);
-    return (result.Items || []).map(stripKeys);
+    if (!isAWSConfigured()) return _localMods('get', userId);
+    try {
+      const result = await callDynamo('getModules', userId);
+      console.log(`[DynamoDB] QueryCommand: ${result.modules?.length || 0} modules`);
+      return result.modules || [];
+    } catch (err) {
+      console.warn('[DynamoDB] getModules failed:', err.message);
+      return _localMods('get', userId);
+    }
   },
 
   /**
    * Save a module
-   * DynamoDB Operation: PutCommand
+   * Server: DynamoDB PutCommand
    */
   async putModule(userId, mod) {
-    if (!isAWSConfigured()) return _localPutModule(userId, mod);
-
-    await dynamoDB.send(new PutCommand({
-      TableName: TABLE_NAME,
-      Item: {
-        PK: `USER#${userId}`,
-        SK: `MODULE#${mod.code}`,
-        ...mod,
-      },
-    }));
-
-    console.log(`[DynamoDB] Put: MODULE#${mod.code}`);
-    return mod;
+    if (!isAWSConfigured()) return _localMods('put', userId, mod);
+    try {
+      await callDynamo('putModule', userId, mod);
+      console.log(`[DynamoDB] PutCommand: MODULE#${mod.code}`);
+      return mod;
+    } catch (err) {
+      console.warn('[DynamoDB] putModule failed:', err.message);
+      return _localMods('put', userId, mod);
+    }
   },
 
   /**
    * Delete a module
-   * DynamoDB Operation: DeleteCommand
+   * Server: DynamoDB DeleteCommand
    */
-  async deleteModule(userId, moduleCode) {
-    if (!isAWSConfigured()) return _localDeleteModule(userId, moduleCode);
-
-    await dynamoDB.send(new DeleteCommand({
-      TableName: TABLE_NAME,
-      Key: { PK: `USER#${userId}`, SK: `MODULE#${moduleCode}` },
-    }));
-
-    console.log(`[DynamoDB] Delete: MODULE#${moduleCode}`);
-  },
-
-  // ═══════════════════════════════════════════════════════════════════
-  // SCAN (for deadline checking across all users)
-  // ═══════════════════════════════════════════════════════════════════
-
-  /**
-   * Scan all tasks in the table
-   * DynamoDB Operation: ScanCommand with filter
-   */
-  async scanAllTasks() {
-    if (!isAWSConfigured()) return [];
-
-    const result = await dynamoDB.send(new ScanCommand({
-      TableName: TABLE_NAME,
-      FilterExpression: 'begins_with(SK, :sk)',
-      ExpressionAttributeValues: { ':sk': 'TASK#' },
-    }));
-
-    console.log(`[DynamoDB] Scan: ${result.Items?.length || 0} total tasks`);
-    return (result.Items || []).map(stripKeys);
+  async deleteModule(userId, code) {
+    if (!isAWSConfigured()) return _localMods('delete', userId, { code });
+    try {
+      await callDynamo('deleteModule', userId, { code });
+      console.log(`[DynamoDB] DeleteCommand: MODULE#${code}`);
+    } catch (err) {
+      console.warn('[DynamoDB] deleteModule failed:', err.message);
+    }
   },
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════════════
-
-/** Remove PK/SK from returned items (internal DynamoDB keys) */
-function stripKeys(item) {
-  const { PK, SK, ...rest } = item;
-  return rest;
+// ═══ localStorage fallbacks ═══
+function _local(op, userId, data) {
+  const key = `vectra.tasks.${userId}`;
+  const tasks = JSON.parse(localStorage.getItem(key) || '[]');
+  if (op === 'getTasks') return tasks;
+  if (op === 'putTask') { tasks.push(data); localStorage.setItem(key, JSON.stringify(tasks)); return data; }
+  if (op === 'updateTask') { const i = tasks.findIndex(t => t.id === data.taskId); if (i >= 0) tasks[i] = { ...tasks[i], ...data.updates }; localStorage.setItem(key, JSON.stringify(tasks)); return tasks[i]; }
+  if (op === 'deleteTask') { localStorage.setItem(key, JSON.stringify(tasks.filter(t => t.id !== data.taskId))); }
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// LOCAL STORAGE FALLBACKS (when AWS not configured)
-// ═══════════════════════════════════════════════════════════════════
-
-function _localGetTasks(userId) {
-  return JSON.parse(localStorage.getItem(`vectra.tasks.${userId}`) || '[]');
-}
-
-function _localPutTask(userId, task) {
-  const tasks = _localGetTasks(userId);
-  const idx = tasks.findIndex((t) => t.id === task.id);
-  if (idx >= 0) tasks[idx] = task;
-  else tasks.push(task);
-  localStorage.setItem(`vectra.tasks.${userId}`, JSON.stringify(tasks));
-  return task;
-}
-
-function _localUpdateTask(userId, taskId, updates) {
-  const tasks = _localGetTasks(userId);
-  const idx = tasks.findIndex((t) => t.id === taskId);
-  if (idx >= 0) tasks[idx] = { ...tasks[idx], ...updates };
-  localStorage.setItem(`vectra.tasks.${userId}`, JSON.stringify(tasks));
-  return tasks[idx];
-}
-
-function _localDeleteTask(userId, taskId) {
-  const tasks = _localGetTasks(userId).filter((t) => t.id !== taskId);
-  localStorage.setItem(`vectra.tasks.${userId}`, JSON.stringify(tasks));
-}
-
-function _localGetProfile(userId) {
+function _localProfile(op, userId, data) {
   const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
-  return users[userId] || null;
+  if (op === 'get') return users[userId] || null;
+  if (op === 'put') { users[userId] = data; localStorage.setItem('pt_users', JSON.stringify(users)); return data; }
 }
-
-function _localPutProfile(userId, profile) {
-  const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
-  users[userId] = profile;
-  localStorage.setItem('pt_users', JSON.stringify(users));
-  return profile;
-}
-
-function _localGetProfileByEmail(email) {
-  const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
-  return users[email] || null;
-}
-
-function _localGetModules(userId) {
-  return JSON.parse(localStorage.getItem(`vectra.modules.${userId}`) || '[]');
-}
-
-function _localPutModule(userId, mod) {
-  const mods = _localGetModules(userId);
-  const idx = mods.findIndex((m) => m.code === mod.code);
-  if (idx >= 0) mods[idx] = mod;
-  else mods.push(mod);
-  localStorage.setItem(`vectra.modules.${userId}`, JSON.stringify(mods));
-  return mod;
-}
-
-function _localDeleteModule(userId, code) {
-  const mods = _localGetModules(userId).filter((m) => m.code !== code);
-  localStorage.setItem(`vectra.modules.${userId}`, JSON.stringify(mods));
+function _localMods(op, userId, data) {
+  const key = `vectra.modules.${userId}`;
+  const mods = JSON.parse(localStorage.getItem(key) || '[]');
+  if (op === 'get') return mods;
+  if (op === 'put') { const i = mods.findIndex(m => m.code === data.code); if (i >= 0) mods[i] = data; else mods.push(data); localStorage.setItem(key, JSON.stringify(mods)); return data; }
+  if (op === 'delete') { localStorage.setItem(key, JSON.stringify(mods.filter(m => m.code !== data.code))); }
 }
 
 export default DynamoClient;
