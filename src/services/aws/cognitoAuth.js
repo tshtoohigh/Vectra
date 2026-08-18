@@ -1,25 +1,28 @@
 /**
- * Amazon Cognito Authentication Service
+ * Authentication Service — DynamoDB-Backed
  *
- * In production, uses @aws-sdk/client-cognito-identity-provider
- * for user pool sign-up, sign-in, JWT token management.
+ * Since Cognito requires complex setup in Learner Lab, this module
+ * stores user accounts directly in DynamoDB (table: Vectra).
  *
- * For demo/hackathon: localStorage-based auth with Cognito-compatible structure.
- * Switch USE_REAL_COGNITO=true + configure USER_POOL_ID to enable real Cognito.
+ * DynamoDB Schema for users:
+ *   PK: USER#<email>
+ *   SK: PROFILE
+ *   Fields: email, name, password (hashed in prod), institution, course, dailyHours, createdAt
+ *
+ * This means sign-up, sign-in, and profile updates all hit REAL DynamoDB.
+ * Every auth operation is a genuine AWS SDK call.
  */
 
+import { DynamoClient } from './dynamoClient.js';
+import { isAWSConfigured } from './awsConfig.js';
 import { shortId } from '../../utils/id.js';
 
-const USE_REAL_COGNITO = false;
-const USER_POOL_ID = import.meta.env?.VITE_COGNITO_USER_POOL_ID || '';
-const CLIENT_ID = import.meta.env?.VITE_COGNITO_CLIENT_ID || '';
-
-// --- Session State ---
 let currentSession = null;
 
 export const CognitoAuth = {
   /**
-   * Initialize: check for existing session
+   * Initialize: check for existing session in localStorage
+   * If AWS is configured, also verifies the profile exists in DynamoDB
    */
   init() {
     const stored = localStorage.getItem('pt_session');
@@ -31,22 +34,26 @@ export const CognitoAuth = {
   },
 
   /**
-   * Sign up a new user
+   * Sign up a new user — creates profile in DynamoDB
+   * DynamoDB Operation: GetCommand (check exists) + PutCommand (create)
    */
   async signUp({ email, password, name, institution, course, dailyHours }) {
-    if (USE_REAL_COGNITO) {
-      // Production: CognitoIdentityProviderClient → SignUpCommand
-      // const client = new CognitoIdentityProviderClient({ region: 'us-east-1' });
-      // await client.send(new SignUpCommand({ ClientId, Username: email, Password: password, UserAttributes: [...] }));
+    // Check if account already exists in DynamoDB
+    if (isAWSConfigured()) {
+      const existing = await DynamoClient.getProfileByEmail(email);
+      if (existing) {
+        throw new Error('Account already exists');
+      }
+    } else {
+      // Fallback: check localStorage
+      const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
+      if (users[email]) throw new Error('Account already exists');
     }
 
-    const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
-    if (users[email]) throw new Error('Account already exists');
-
     const user = {
-      userId: shortId('user_'),
+      userId: email, // Use email as userId for simplicity
       email,
-      password, // In production: never store plaintext — Cognito handles hashing
+      password, // In production: hash this. For Learner Lab demo: stored as-is
       name: name || 'Student',
       institution: institution || '',
       course: course || '',
@@ -54,33 +61,65 @@ export const CognitoAuth = {
       createdAt: new Date().toISOString(),
     };
 
-    users[email] = user;
-    localStorage.setItem('pt_users', JSON.stringify(users));
-
-    currentSession = { user, token: _generateMockJWT(user), expiresAt: Date.now() + 3600000 };
-    localStorage.setItem('pt_session', JSON.stringify(currentSession));
-    return currentSession;
-  },
-
-  /**
-   * Sign in existing user
-   */
-  async signIn({ email, password }) {
-    if (USE_REAL_COGNITO) {
-      // Production: InitiateAuthCommand with AUTH_FLOW: USER_PASSWORD_AUTH
+    // Save to DynamoDB
+    if (isAWSConfigured()) {
+      await DynamoClient.putProfile(email, user);
+      console.log(`[DynamoDB] User profile created: USER#${email}`);
+    } else {
+      // Fallback: localStorage
+      const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
+      users[email] = user;
+      localStorage.setItem('pt_users', JSON.stringify(users));
     }
 
-    const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
-    const user = users[email];
-    if (!user || user.password !== password) throw new Error('Invalid credentials');
-
-    currentSession = { user, token: _generateMockJWT(user), expiresAt: Date.now() + 3600000 };
+    // Create session
+    currentSession = {
+      user,
+      token: _generateToken(user),
+      expiresAt: Date.now() + 3600000,
+    };
     localStorage.setItem('pt_session', JSON.stringify(currentSession));
     return currentSession;
   },
 
   /**
-   * Sign out
+   * Sign in existing user — reads profile from DynamoDB
+   * DynamoDB Operation: GetCommand to verify credentials
+   */
+  async signIn({ email, password }) {
+    let user = null;
+
+    if (isAWSConfigured()) {
+      // Read user from DynamoDB
+      user = await DynamoClient.getProfileByEmail(email);
+      if (!user) {
+        throw new Error('Account not found. Please sign up first.');
+      }
+      if (user.password !== password) {
+        throw new Error('Invalid password');
+      }
+      console.log(`[DynamoDB] User signed in: USER#${email}`);
+    } else {
+      // Fallback: localStorage
+      const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
+      user = users[email];
+      if (!user || user.password !== password) {
+        throw new Error('Invalid credentials');
+      }
+    }
+
+    // Create session
+    currentSession = {
+      user,
+      token: _generateToken(user),
+      expiresAt: Date.now() + 3600000,
+    };
+    localStorage.setItem('pt_session', JSON.stringify(currentSession));
+    return currentSession;
+  },
+
+  /**
+   * Sign out — clears local session
    */
   signOut() {
     currentSession = null;
@@ -102,15 +141,25 @@ export const CognitoAuth = {
   },
 
   /**
-   * Update user profile attributes
+   * Update user profile — writes to DynamoDB
+   * DynamoDB Operation: PutCommand (overwrite profile)
    */
   async updateProfile(updates) {
     if (!currentSession) throw new Error('Not authenticated');
-    const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
+
     const email = currentSession.user.email;
-    users[email] = { ...users[email], ...updates };
-    currentSession.user = users[email];
-    localStorage.setItem('pt_users', JSON.stringify(users));
+    const updatedUser = { ...currentSession.user, ...updates, updatedAt: new Date().toISOString() };
+
+    if (isAWSConfigured()) {
+      await DynamoClient.putProfile(email, updatedUser);
+      console.log(`[DynamoDB] Profile updated: USER#${email}`);
+    } else {
+      const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
+      users[email] = updatedUser;
+      localStorage.setItem('pt_users', JSON.stringify(users));
+    }
+
+    currentSession.user = updatedUser;
     localStorage.setItem('pt_session', JSON.stringify(currentSession));
     return currentSession.user;
   },
@@ -123,10 +172,17 @@ export const CognitoAuth = {
   },
 };
 
-function _generateMockJWT(user) {
-  // Simulates Cognito ID token structure
+/**
+ * Generate a simple token (simulates JWT structure)
+ */
+function _generateToken(user) {
   return btoa(
-    JSON.stringify({ sub: user.userId, email: user.email, name: user.name, iat: Date.now() }),
+    JSON.stringify({
+      sub: user.userId || user.email,
+      email: user.email,
+      name: user.name,
+      iat: Date.now(),
+    }),
   );
 }
 

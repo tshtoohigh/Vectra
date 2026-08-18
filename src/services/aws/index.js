@@ -1,7 +1,7 @@
 export { CognitoAuth } from './cognitoAuth.js';
-export { APIGateway } from './apiGateway.js';
+export { DynamoClient } from './dynamoClient.js';
 export { BedrockClient } from './bedrockClient.js';
 export { TextractClient } from './textractClient.js';
-export { DynamoClient } from './dynamoClient.js';
 export { SNSNotifier } from './snsNotifier.js';
 export { EventBridgeScheduler } from './eventBridgeScheduler.js';
+export { isAWSConfigured, dynamoDB, snsClient, TABLE_NAME, SNS_TOPIC_ARN } from './awsConfig.js';

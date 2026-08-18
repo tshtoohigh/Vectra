@@ -1,106 +1,124 @@
 /**
- * Amazon Bedrock AI Service (via Lambda)
+ * AI Service — DynamoDB-Backed Processing
  *
- * When API Gateway is configured:
- *   All AI operations go through API Gateway → Lambda → DynamoDB
- *   The Lambda function processes tasks server-side (real AWS compute).
+ * Since Bedrock is blocked in Learner Lab, this module uses intelligent
+ * rule-based logic for task parsing and decomposition. BUT — critically —
+ * it reads tasks FROM DynamoDB and writes results BACK to DynamoDB.
  *
- * When API Gateway is NOT configured:
- *   Falls back to client-side mock logic (demo mode).
+ * Every AI operation involves real DynamoDB calls:
+ *   - decomposeTask: GetCommand (read task) → generates milestones → UpdateCommand (write subtasks)
+ *   - rebalanceWorkload: QueryCommand (read all tasks) → analysis → returns advice
+ *   - parseNaturalLanguage: parses input → returns structured data for PutCommand later
  *
- * Note: Bedrock itself is blocked in Learner Lab, so the Lambda uses
- * rule-based intelligence. The important thing is the processing happens
- * on REAL AWS infrastructure (Lambda reading/writing DynamoDB), not
- * in the browser.
+ * This demonstrates DynamoDB being used for intelligent data processing,
+ * not just simple CRUD.
  */
 
-import { APIGateway } from './apiGateway.js';
+import { DynamoClient } from './dynamoClient.js';
+import { isAWSConfigured } from './awsConfig.js';
 import { shortId } from '../../utils/id.js';
 
 export const BedrockClient = {
   /**
    * Parse natural language input into structured task JSON
-   * → Calls Lambda via API Gateway (real server-side processing)
+   * Processing happens here, result gets saved to DynamoDB by the caller
    */
   async parseNaturalLanguage(input) {
-    if (APIGateway.isConfigured()) {
-      try {
-        const result = await APIGateway.aiParse(input);
-        console.log('[Bedrock/Lambda] Server-side parse result:', result);
-        return result;
-      } catch (err) {
-        console.warn('[Bedrock/Lambda] Parse failed, using local fallback:', err.message);
-      }
-    }
-    // Fallback: local mock parsing
-    return _mockParse(input);
+    const result = _parseInput(input);
+    console.log('[AI] Parsed natural language input:', result.title);
+    return result;
   },
 
   /**
    * Decompose a task into 3-5 actionable sub-milestones
-   * → Calls Lambda which reads from DynamoDB, generates milestones,
-   *   writes them back to DynamoDB, and returns the result.
+   *
+   * DynamoDB Operations:
+   *   1. GetCommand — read the task from DynamoDB
+   *   2. (generate milestones)
+   *   3. UpdateCommand — write subtasks back to DynamoDB
    */
-  async decomposeTask(task) {
-    if (APIGateway.isConfigured()) {
-      try {
-        const result = await APIGateway.aiDecompose(task.id);
-        console.log('[Bedrock/Lambda] Server-side decompose result:', result);
-        return result;
-      } catch (err) {
-        console.warn('[Bedrock/Lambda] Decompose failed, using local fallback:', err.message);
+  async decomposeTask(task, userId) {
+    let taskData = task;
+
+    // If AWS configured, read fresh task data from DynamoDB
+    if (isAWSConfigured() && userId && task.id) {
+      const fresh = await DynamoClient.getTask(userId, task.id);
+      if (fresh) {
+        taskData = fresh;
+        console.log(`[AI+DynamoDB] Read task from DynamoDB for decomposition: ${task.id}`);
       }
     }
-    // Fallback: local mock
-    return _mockDecompose(task);
+
+    // Generate milestones
+    const breakdown = _generateMilestones(taskData);
+
+    // Write subtasks back to DynamoDB
+    if (isAWSConfigured() && userId && task.id) {
+      await DynamoClient.updateTask(userId, task.id, {
+        subtasks: breakdown.subtasks,
+        status: 'In Progress',
+      });
+      console.log(`[AI+DynamoDB] Wrote ${breakdown.subtasks.length} milestones back to DynamoDB`);
+    }
+
+    return breakdown;
   },
 
   /**
-   * Generate AI study plan / rebalance overloaded days
-   * → Calls Lambda which queries ALL tasks from DynamoDB and analyzes workload
+   * Analyze workload and suggest rebalancing
+   *
+   * DynamoDB Operations:
+   *   1. QueryCommand — read ALL user tasks from DynamoDB
+   *   2. (analyze workload distribution)
+   *   3. Return advice based on real data
    */
-  async rebalanceWorkload(tasks, dailyHours = 4) {
-    if (APIGateway.isConfigured()) {
-      try {
-        const result = await APIGateway.aiRebalance();
-        console.log('[Bedrock/Lambda] Server-side rebalance result:', result);
-        return result;
-      } catch (err) {
-        console.warn('[Bedrock/Lambda] Rebalance failed, using local fallback:', err.message);
-      }
+  async rebalanceWorkload(tasks, dailyHours = 4, userId) {
+    let taskList = tasks;
+
+    // If AWS configured, read ALL tasks fresh from DynamoDB
+    if (isAWSConfigured() && userId) {
+      taskList = await DynamoClient.getTasks(userId);
+      console.log(`[AI+DynamoDB] Read ${taskList.length} tasks from DynamoDB for rebalancing`);
     }
-    // Fallback: local mock
-    return _mockRebalance(tasks, dailyHours);
+
+    return _analyzeWorkload(taskList, dailyHours);
   },
 
   /**
    * Generate priority explanation for a task
    */
   async explainPriority(task, allTasks) {
-    return _mockExplain(task, allTasks);
+    return _generateExplanation(task, allTasks);
   },
 };
 
-// === LOCAL FALLBACK IMPLEMENTATIONS (used when API is not configured) ===
+// ═══════════════════════════════════════════════════════════════════
+// INTELLIGENT PROCESSING LOGIC
+// ═══════════════════════════════════════════════════════════════════
 
-function _mockParse(input) {
+function _parseInput(input) {
   const lower = input.toLowerCase();
 
+  // Task type detection
   let taskType = 'Assignment';
   if (lower.match(/\b(test|quiz|exam|midterm|final)\b/)) taskType = 'Test';
   else if (lower.match(/\b(project|prototype|capstone)\b/)) taskType = 'Project';
   else if (lower.match(/\b(presentation|present|pitch|demo)\b/)) taskType = 'Presentation';
   else if (lower.match(/\b(practical|lab|experiment|workshop)\b/)) taskType = 'Practical';
 
+  // Extract weightage
   const weightMatch = input.match(/(?:worth|weight|weightage)?\s*(\d+)\s*%/i);
   const weightage = weightMatch ? parseInt(weightMatch[1]) : null;
 
+  // Extract module code
   const moduleMatch = input.match(/\b([A-Z]{2,4}\s?\d{3,4})\b/i);
   const moduleCode = moduleMatch ? moduleMatch[1].replace(/\s/g, '').toUpperCase() : '';
 
+  // Extract hours
   const hoursMatch = input.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i);
   const hours = hoursMatch ? parseFloat(hoursMatch[1]) : null;
 
+  // Extract deadline
   let deadline = null;
   const now = new Date();
   if (lower.includes('tomorrow')) {
@@ -123,8 +141,27 @@ function _mockParse(input) {
     d.setDate(d.getDate() + 7);
     d.setHours(23, 59, 0, 0);
     deadline = d.toISOString();
+  } else if (lower.match(/in\s+(\d+)\s+days?/)) {
+    const days = parseInt(lower.match(/in\s+(\d+)\s+days?/)[1]);
+    const d = new Date(now);
+    d.setDate(d.getDate() + days);
+    d.setHours(23, 59, 0, 0);
+    deadline = d.toISOString();
   }
 
+  // Time extraction
+  const timeMatch = input.match(/(\d{1,2})[:\.](\d{2})\s*(am|pm)?/i);
+  if (timeMatch && deadline) {
+    let hours24 = parseInt(timeMatch[1]);
+    const mins = parseInt(timeMatch[2]);
+    if (timeMatch[3]?.toLowerCase() === 'pm' && hours24 < 12) hours24 += 12;
+    if (timeMatch[3]?.toLowerCase() === 'am' && hours24 === 12) hours24 = 0;
+    const d = new Date(deadline);
+    d.setHours(hours24, mins, 0, 0);
+    deadline = d.toISOString();
+  }
+
+  // Extract title
   let title = input
     .replace(/\b(due|by|before|on|at|worth|weight|weightage|taking|about|around)\b.*$/gi, '')
     .replace(/\b[A-Z]{2,4}\s?\d{3,4}\b/gi, '')
@@ -144,12 +181,11 @@ function _mockParse(input) {
     weightage,
     hours,
     confidence: 0.85,
-    source: 'local (API not configured)',
     _rawInput: input,
   };
 }
 
-function _mockDecompose(task) {
+function _generateMilestones(task) {
   const totalHours = task.hours || task.estimatedHours || 6;
   const deadline = new Date(task.deadline);
   const daysAvailable = Math.max(1, Math.ceil((deadline.getTime() - Date.now()) / 86400000));
@@ -204,19 +240,51 @@ function _mockDecompose(task) {
       done: false,
       dueDate: new Date(Date.now() + (i + 1) * (daysAvailable / numSteps) * 86400000).toISOString(),
     })),
-    reasoning: `Breaking "${task.title}" into ${numSteps} manageable milestones over ${daysAvailable} days. Each step takes ~${hoursPerStep}h. (Local fallback — connect API for server-side processing.)`,
+    reasoning: `Breaking "${task.title}" into ${numSteps} manageable milestones over ${daysAvailable} days. Each step takes ~${hoursPerStep}h, distributing the ${totalHours}h workload evenly to prevent last-minute cramming.`,
   };
 }
 
-function _mockRebalance(tasks, dailyHours) {
-  const activeTasks = tasks.filter((t) => t.status !== 'Completed');
+function _analyzeWorkload(tasks, dailyHours) {
+  const active = tasks.filter((t) => t.status !== 'Completed');
+  const now = Date.now();
+
+  const urgent = [];
+  const heavy = [];
+  const comfortable = [];
+
+  active.forEach((t) => {
+    const deadline = new Date(t.deadline).getTime();
+    const hoursLeft = (deadline - now) / 3600000;
+    const remaining = (t.hours || 4) * (1 - (t.progress || 0) / 100);
+
+    if (hoursLeft < 48 && remaining > 2) urgent.push(t);
+    else if (hoursLeft < 120 && remaining > 4) heavy.push(t);
+    else comfortable.push(t);
+  });
+
+  const parts = [];
+  if (urgent.length) {
+    const names = urgent.slice(0, 3).map((t) => t.title?.substring(0, 30) || '?').join(', ');
+    parts.push(`URGENT: ${names} — due very soon with significant work remaining. Focus here first.`);
+  }
+  if (heavy.length) {
+    const names = heavy.slice(0, 3).map((t) => t.title?.substring(0, 30) || '?').join(', ');
+    parts.push(`Heavy load: ${names} — start making progress now to avoid a crunch.`);
+  }
+  if (comfortable.length) {
+    parts.push(`${comfortable.length} task(s) are on track with comfortable timelines.`);
+  }
+
   return {
-    suggestion: `You have ${activeTasks.length} active tasks. Connect the API Gateway for real server-side workload analysis from DynamoDB.`,
-    redistributed: activeTasks.map((t) => ({ ...t, _aiNote: 'Consider starting earlier' })),
+    suggestion: parts.join(' ') || 'Your workload looks manageable. Keep steady progress.',
+    urgentCount: urgent.length,
+    heavyCount: heavy.length,
+    comfortableCount: comfortable.length,
+    redistributed: active.map((t) => ({ ...t, _aiNote: 'Consider starting earlier' })),
   };
 }
 
-function _mockExplain(task, allTasks) {
+function _generateExplanation(task, allTasks) {
   const hrs = Math.max(0, (new Date(task.deadline).getTime() - Date.now()) / 3600000);
   const daysLeft = Math.round((hrs / 24) * 10) / 10;
   const needed = Math.round((task.hours || 4) * (1 - (task.progress || 0) / 100));
@@ -228,6 +296,7 @@ function _mockExplain(task, allTasks) {
   );
 
   let msg = `Worth ${task.weightage || 10}% of your grade with about ${needed}h of work left and ${daysLeft} days to go.`;
+
   if (conflicts.length > 0) {
     const names = conflicts
       .slice(0, 2)

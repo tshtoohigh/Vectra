@@ -8,10 +8,10 @@ import React, {
   useRef,
 } from 'react';
 import { CognitoAuth } from '../services/aws/cognitoAuth.js';
-import { APIGateway } from '../services/aws/apiGateway.js';
+import { DynamoClient } from '../services/aws/dynamoClient.js';
 import { SNSNotifier } from '../services/aws/snsNotifier.js';
 import { EventBridgeScheduler } from '../services/aws/eventBridgeScheduler.js';
-import { DEMO_TASKS, DEMO_MODULES, DEMO_USER } from '../utils/demoData.js';
+import { isAWSConfigured } from '../services/aws/awsConfig.js';
 import { shortId } from '../utils/id.js';
 import {
   calculatePriority,
@@ -54,23 +54,37 @@ export function AppProvider({ children }) {
 
   const storeEmail = user?.email || 'guest';
 
-  // New users get a clean empty state — no pre-recorded dummy data
+  // Tasks and modules — loaded from localStorage initially, then synced from DynamoDB
   const [tasks, setTasks] = useState(() => load(tasksKey(storeEmail), []));
   const [modules, setModules] = useState(() => load(modulesKey(storeEmail), []));
+  const [isLoading, setIsLoading] = useState(false);
 
-  // Load tasks from real DynamoDB on mount (if API configured)
+  // ---------- Load from DynamoDB on mount ----------
   useEffect(() => {
-    if (APIGateway.isConfigured()) {
-      APIGateway.getTasks()
-        .then((result) => {
-          if (result?.tasks?.length) {
-            console.log(`[DynamoDB] Loaded ${result.tasks.length} tasks from AWS`);
-            setTasks(result.tasks);
+    if (isAWSConfigured() && storeEmail && storeEmail !== 'guest') {
+      setIsLoading(true);
+      Promise.all([
+        DynamoClient.getTasks(storeEmail),
+        DynamoClient.getModules(storeEmail),
+      ])
+        .then(([dbTasks, dbModules]) => {
+          if (dbTasks.length > 0) {
+            setTasks(dbTasks);
+            persist(tasksKey(storeEmail), dbTasks);
+            console.log(`[AppContext] Loaded ${dbTasks.length} tasks from DynamoDB`);
+          }
+          if (dbModules.length > 0) {
+            setModules(dbModules);
+            persist(modulesKey(storeEmail), dbModules);
+            console.log(`[AppContext] Loaded ${dbModules.length} modules from DynamoDB`);
           }
         })
-        .catch((err) => console.warn('[DynamoDB] Initial load failed:', err.message));
+        .catch((err) => {
+          console.warn('[AppContext] DynamoDB load failed, using localStorage:', err.message);
+        })
+        .finally(() => setIsLoading(false));
     }
-  }, []);
+  }, [storeEmail]);
 
   // ---------- Notifications & toasts ----------
   const [notifications, setNotifications] = useState([]);
@@ -81,7 +95,7 @@ export function AppProvider({ children }) {
     tasksRef.current = tasks;
   }, [tasks]);
 
-  // Persist on change
+  // Persist to localStorage on change (backup)
   useEffect(() => {
     persist(tasksKey(storeEmail), tasks);
   }, [tasks, storeEmail]);
@@ -104,8 +118,21 @@ export function AppProvider({ children }) {
   // ---------- EventBridge → SNS deadline sweep ----------
   useEffect(() => {
     const runSweep = () => {
-      const fresh = SNSNotifier.checkAndNotify(tasksRef.current);
-      if (fresh.length) {
+      const fresh = SNSNotifier.checkAndNotify(tasksRef.current, storeEmail);
+      if (fresh && fresh.then) {
+        // Async version (real AWS)
+        fresh.then((results) => {
+          if (results && results.length) {
+            setNotifications(SNSNotifier.getNotifications());
+            const top = results[0];
+            pushToast({
+              tone: top.type === 'overdue' || top.type === 'critical' ? 'error' : 'warning',
+              title: top.title,
+              message: top.message,
+            });
+          }
+        });
+      } else if (Array.isArray(fresh) && fresh.length) {
         setNotifications(SNSNotifier.getNotifications());
         const top = fresh[0];
         pushToast({
@@ -119,9 +146,11 @@ export function AppProvider({ children }) {
     EventBridgeScheduler.registerJob('deadline-sweep', runSweep);
     EventBridgeScheduler.start({ intervalMs: 90000 });
 
-    // Initial sweep shortly after mount so the bell reflects reality
+    // Initial sweep shortly after mount
     const t = setTimeout(() => {
-      SNSNotifier.checkAndNotify(tasksRef.current);
+      SNSNotifier.checkAndNotify(tasksRef.current, storeEmail).then?.((results) => {
+        setNotifications(SNSNotifier.getNotifications());
+      });
       setNotifications(SNSNotifier.getNotifications());
     }, 1200);
 
@@ -130,7 +159,7 @@ export function AppProvider({ children }) {
       EventBridgeScheduler.unregisterJob('deadline-sweep');
       EventBridgeScheduler.stop();
     };
-  }, [pushToast]);
+  }, [pushToast, storeEmail]);
 
   const dismissNotification = useCallback((id) => {
     SNSNotifier.dismiss(id);
@@ -142,7 +171,7 @@ export function AppProvider({ children }) {
     setNotifications([]);
   }, []);
 
-  // ---------- Task mutations ----------
+  // ---------- Task mutations (all sync to DynamoDB) ----------
   const createTask = useCallback((input) => {
     const task = {
       id: newId('task'),
@@ -161,71 +190,83 @@ export function AppProvider({ children }) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+
+    // Update local state immediately
     setTasks((prev) => [task, ...prev]);
-    // Sync to real DynamoDB via API Gateway → Lambda
-    if (APIGateway.isConfigured()) {
-      APIGateway.createTask(task).then((res) => {
-        if (res?.task?.id) {
-          console.log('[DynamoDB] Task created:', res.task.id);
-        }
-      }).catch((err) => console.warn('[DynamoDB] Create failed:', err.message));
+
+    // Write to DynamoDB (PutCommand)
+    if (isAWSConfigured()) {
+      DynamoClient.putTask(storeEmail, task)
+        .then(() => console.log(`[DynamoDB] PutCommand: TASK#${task.id} created`))
+        .catch((err) => console.error('[DynamoDB] Create failed:', err.message));
     }
+
     return task;
-  }, []);
+  }, [storeEmail]);
 
   const updateTask = useCallback((id, patch) => {
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, ...patch, updatedAt: new Date().toISOString() } : t)),
     );
-    // Sync to real DynamoDB
-    if (APIGateway.isConfigured()) {
-      APIGateway.updateTask(id, patch).catch((err) =>
-        console.warn('[DynamoDB] Update failed:', err.message)
-      );
+
+    // Write to DynamoDB (UpdateCommand)
+    if (isAWSConfigured()) {
+      DynamoClient.updateTask(storeEmail, id, patch)
+        .then(() => console.log(`[DynamoDB] UpdateCommand: TASK#${id}`))
+        .catch((err) => console.error('[DynamoDB] Update failed:', err.message));
     }
-  }, []);
+  }, [storeEmail]);
 
   const deleteTask = useCallback((id) => {
     setTasks((prev) => prev.filter((t) => t.id !== id));
-    // Sync to real DynamoDB
-    if (APIGateway.isConfigured()) {
-      APIGateway.deleteTask(id).catch((err) =>
-        console.warn('[DynamoDB] Delete failed:', err.message)
-      );
+
+    // Delete from DynamoDB (DeleteCommand)
+    if (isAWSConfigured()) {
+      DynamoClient.deleteTask(storeEmail, id)
+        .then(() => console.log(`[DynamoDB] DeleteCommand: TASK#${id}`))
+        .catch((err) => console.error('[DynamoDB] Delete failed:', err.message));
     }
-  }, []);
+  }, [storeEmail]);
 
   const completeTask = useCallback((id) => {
+    const patch = { progress: 100, status: 'Completed' };
     setTasks((prev) =>
       prev.map((t) =>
         t.id === id
           ? {
               ...t,
-              progress: 100,
-              status: 'Completed',
+              ...patch,
               subtasks: (t.subtasks || []).map((s) => ({ ...s, done: true })),
               updatedAt: new Date().toISOString(),
             }
           : t,
       ),
     );
-    // Sync to real DynamoDB
-    if (APIGateway.isConfigured()) {
-      APIGateway.updateTask(id, { progress: 100, status: 'Completed' }).catch((err) =>
-        console.warn('[DynamoDB] Complete failed:', err.message)
-      );
+
+    // Write to DynamoDB (UpdateCommand)
+    if (isAWSConfigured()) {
+      DynamoClient.updateTask(storeEmail, id, patch)
+        .then(() => console.log(`[DynamoDB] UpdateCommand: TASK#${id} completed`))
+        .catch((err) => console.error('[DynamoDB] Complete failed:', err.message));
     }
-  }, []);
+  }, [storeEmail]);
 
   const reopenTask = useCallback((id) => {
+    const patch = { status: 'In Progress', progress: 50 };
     setTasks((prev) =>
       prev.map((t) =>
         t.id === id
-          ? { ...t, status: 'In Progress', progress: 50, updatedAt: new Date().toISOString() }
+          ? { ...t, ...patch, updatedAt: new Date().toISOString() }
           : t,
       ),
     );
-  }, []);
+
+    if (isAWSConfigured()) {
+      DynamoClient.updateTask(storeEmail, id, patch)
+        .then(() => console.log(`[DynamoDB] UpdateCommand: TASK#${id} reopened`))
+        .catch((err) => console.error('[DynamoDB] Reopen failed:', err.message));
+    }
+  }, [storeEmail]);
 
   /** Replace a task's milestone list (used by the AI decompose drawer). */
   const setSubtasks = useCallback((taskId, subtasks) => {
@@ -243,7 +284,16 @@ export function AppProvider({ children }) {
         };
       }),
     );
-  }, []);
+
+    // Write subtasks to DynamoDB (UpdateCommand)
+    if (isAWSConfigured()) {
+      const done = subtasks.filter((s) => s.done).length;
+      const progress = subtasks.length ? Math.round((done / subtasks.length) * 100) : 0;
+      DynamoClient.updateTask(storeEmail, taskId, { subtasks, progress })
+        .then(() => console.log(`[DynamoDB] UpdateCommand: TASK#${taskId} subtasks updated`))
+        .catch((err) => console.error('[DynamoDB] Subtasks update failed:', err.message));
+    }
+  }, [storeEmail]);
 
   const toggleSubtask = useCallback((taskId, subtaskId, done) => {
     setTasks((prev) =>
@@ -263,24 +313,45 @@ export function AppProvider({ children }) {
         };
       }),
     );
-  }, []);
+
+    // Sync to DynamoDB
+    if (isAWSConfigured()) {
+      // Get updated task to send correct subtasks
+      setTasks((prev) => {
+        const task = prev.find((t) => t.id === taskId);
+        if (task) {
+          DynamoClient.updateTask(storeEmail, taskId, {
+            subtasks: task.subtasks,
+            progress: task.progress,
+            status: task.status,
+          }).catch((err) => console.error('[DynamoDB] Toggle subtask failed:', err.message));
+        }
+        return prev;
+      });
+    }
+  }, [storeEmail]);
 
   const setProgress = useCallback((taskId, progress) => {
+    const patch = {
+      progress,
+      status: progress >= 100 ? 'Completed' : progress > 0 ? 'In Progress' : 'Pending',
+    };
     setTasks((prev) =>
       prev.map((t) =>
         t.id === taskId
-          ? {
-              ...t,
-              progress,
-              status: progress >= 100 ? 'Completed' : progress > 0 ? 'In Progress' : 'Pending',
-              updatedAt: new Date().toISOString(),
-            }
+          ? { ...t, ...patch, updatedAt: new Date().toISOString() }
           : t,
       ),
     );
-  }, []);
 
-  // ---------- Modules ----------
+    if (isAWSConfigured()) {
+      DynamoClient.updateTask(storeEmail, taskId, patch)
+        .then(() => console.log(`[DynamoDB] UpdateCommand: TASK#${taskId} progress=${progress}`))
+        .catch((err) => console.error('[DynamoDB] Progress update failed:', err.message));
+    }
+  }, [storeEmail]);
+
+  // ---------- Modules (all sync to DynamoDB) ----------
   const upsertModule = useCallback((mod) => {
     setModules((prev) => {
       const exists = prev.some((m) => m.code === mod.code);
@@ -288,25 +359,38 @@ export function AppProvider({ children }) {
         ? prev.map((m) => (m.code === mod.code ? { ...m, ...mod } : m))
         : [...prev, mod];
     });
-  }, []);
+
+    // Write to DynamoDB (PutCommand)
+    if (isAWSConfigured()) {
+      DynamoClient.putModule(storeEmail, mod)
+        .then(() => console.log(`[DynamoDB] PutCommand: MODULE#${mod.code}`))
+        .catch((err) => console.error('[DynamoDB] Module save failed:', err.message));
+    }
+  }, [storeEmail]);
 
   const deleteModule = useCallback((code) => {
     setModules((prev) => prev.filter((m) => m.code !== code));
-  }, []);
+
+    // Delete from DynamoDB (DeleteCommand)
+    if (isAWSConfigured()) {
+      DynamoClient.deleteModule(storeEmail, code)
+        .then(() => console.log(`[DynamoDB] DeleteCommand: MODULE#${code}`))
+        .catch((err) => console.error('[DynamoDB] Module delete failed:', err.message));
+    }
+  }, [storeEmail]);
 
   // ---------- Profile / auth ----------
   const updateProfile = useCallback(
     async (patch) => {
       setUser((prev) => ({ ...prev, ...patch }));
-      if (!isDemo) {
-        try {
-          await CognitoAuth.updateProfile(patch);
-        } catch {
-          /* demo/offline — local state already updated */
-        }
+      try {
+        await CognitoAuth.updateProfile(patch);
+        // CognitoAuth.updateProfile already writes to DynamoDB
+      } catch {
+        /* demo/offline — local state already updated */
       }
     },
-    [isDemo],
+    [],
   );
 
   const signOut = useCallback(() => {
@@ -319,7 +403,7 @@ export function AppProvider({ children }) {
     setModules([]);
     SNSNotifier.clearAll();
     setNotifications([]);
-    pushToast({ tone: 'success', title: 'Sample data restored' });
+    pushToast({ tone: 'success', title: 'Data cleared' });
   }, [pushToast]);
 
   // ---------- Derived ----------
@@ -375,6 +459,8 @@ export function AppProvider({ children }) {
       // session
       user,
       isDemo,
+      isLoading,
+      isAWSConnected: isAWSConfigured(),
       // data
       tasks,
       modules,
@@ -410,6 +496,7 @@ export function AppProvider({ children }) {
     [
       user,
       isDemo,
+      isLoading,
       tasks,
       modules,
       dailyHours,
