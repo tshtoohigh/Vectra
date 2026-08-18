@@ -8,6 +8,7 @@ import React, {
   useRef,
 } from 'react';
 import { CognitoAuth } from '../services/aws/cognitoAuth.js';
+import { APIGateway } from '../services/aws/apiGateway.js';
 import { SNSNotifier } from '../services/aws/snsNotifier.js';
 import { EventBridgeScheduler } from '../services/aws/eventBridgeScheduler.js';
 import { DEMO_TASKS, DEMO_MODULES, DEMO_USER } from '../utils/demoData.js';
@@ -56,6 +57,20 @@ export function AppProvider({ children }) {
   // New users get a clean empty state — no pre-recorded dummy data
   const [tasks, setTasks] = useState(() => load(tasksKey(storeEmail), []));
   const [modules, setModules] = useState(() => load(modulesKey(storeEmail), []));
+
+  // Load tasks from real DynamoDB on mount (if API configured)
+  useEffect(() => {
+    if (APIGateway.isConfigured()) {
+      APIGateway.getTasks()
+        .then((result) => {
+          if (result?.tasks?.length) {
+            console.log(`[DynamoDB] Loaded ${result.tasks.length} tasks from AWS`);
+            setTasks(result.tasks);
+          }
+        })
+        .catch((err) => console.warn('[DynamoDB] Initial load failed:', err.message));
+    }
+  }, []);
 
   // ---------- Notifications & toasts ----------
   const [notifications, setNotifications] = useState([]);
@@ -147,6 +162,14 @@ export function AppProvider({ children }) {
       updatedAt: new Date().toISOString(),
     };
     setTasks((prev) => [task, ...prev]);
+    // Sync to real DynamoDB via API Gateway → Lambda
+    if (APIGateway.isConfigured()) {
+      APIGateway.createTask(task).then((res) => {
+        if (res?.task?.id) {
+          console.log('[DynamoDB] Task created:', res.task.id);
+        }
+      }).catch((err) => console.warn('[DynamoDB] Create failed:', err.message));
+    }
     return task;
   }, []);
 
@@ -154,10 +177,22 @@ export function AppProvider({ children }) {
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, ...patch, updatedAt: new Date().toISOString() } : t)),
     );
+    // Sync to real DynamoDB
+    if (APIGateway.isConfigured()) {
+      APIGateway.updateTask(id, patch).catch((err) =>
+        console.warn('[DynamoDB] Update failed:', err.message)
+      );
+    }
   }, []);
 
   const deleteTask = useCallback((id) => {
     setTasks((prev) => prev.filter((t) => t.id !== id));
+    // Sync to real DynamoDB
+    if (APIGateway.isConfigured()) {
+      APIGateway.deleteTask(id).catch((err) =>
+        console.warn('[DynamoDB] Delete failed:', err.message)
+      );
+    }
   }, []);
 
   const completeTask = useCallback((id) => {
@@ -174,6 +209,12 @@ export function AppProvider({ children }) {
           : t,
       ),
     );
+    // Sync to real DynamoDB
+    if (APIGateway.isConfigured()) {
+      APIGateway.updateTask(id, { progress: 100, status: 'Completed' }).catch((err) =>
+        console.warn('[DynamoDB] Complete failed:', err.message)
+      );
+    }
   }, []);
 
   const reopenTask = useCallback((id) => {

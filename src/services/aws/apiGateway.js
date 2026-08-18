@@ -1,28 +1,58 @@
 /**
  * Amazon API Gateway REST Client
  *
- * Centralizes all HTTP requests to the API Gateway endpoint.
- * In production: points to https://<api-id>.execute-api.<region>.amazonaws.com/prod
- * For demo: routes to local mock handlers.
+ * Centralizes all HTTP requests to the REAL API Gateway endpoint.
+ * When VITE_API_URL is set, all requests go to the live AWS backend:
+ *   API Gateway → Lambda → DynamoDB / SNS
+ *
+ * When VITE_API_URL is blank, returns null so the app falls back to local state.
  */
 
 const API_BASE = import.meta.env?.VITE_API_URL || '';
 
+/**
+ * Get the current user ID for API requests.
+ * Uses the session from localStorage (set by cognitoAuth).
+ */
+function getUserId() {
+  try {
+    const session = JSON.parse(localStorage.getItem('pt_session') || 'null');
+    return session?.user?.userId || session?.user?.email || 'demo_user';
+  } catch {
+    return 'demo_user';
+  }
+}
+
 export const APIGateway = {
   /**
-   * Generic request handler with JWT auth header
+   * Check if the real API is configured
+   */
+  isConfigured() {
+    return !!API_BASE;
+  },
+
+  /**
+   * Generic request handler — sends real HTTPS requests to API Gateway
    */
   async request(method, path, body = null) {
-    const session = JSON.parse(localStorage.getItem('pt_session') || 'null');
-    const headers = {
-      'Content-Type': 'application/json',
-      ...(session?.token && { Authorization: `Bearer ${session.token}` }),
-    };
-
     // If no real API configured, return null (caller uses local mock)
     if (!API_BASE) return null;
 
-    const response = await fetch(`${API_BASE}${path}`, {
+    const userId = getUserId();
+    const headers = {
+      'Content-Type': 'application/json',
+      'x-user-id': userId,
+    };
+
+    // Add JWT token if available
+    const session = JSON.parse(localStorage.getItem('pt_session') || 'null');
+    if (session?.token) {
+      headers['Authorization'] = `Bearer ${session.token}`;
+    }
+
+    const url = `${API_BASE}${path}${path.includes('?') ? '&' : '?'}userId=${userId}`;
+
+    const response = await fetch(url, {
       method,
       headers,
       ...(body && { body: JSON.stringify(body) }),
@@ -36,24 +66,21 @@ export const APIGateway = {
     return response.json();
   },
 
-  // --- Task Endpoints ---
+  // --- Task Endpoints (→ Lambda → DynamoDB) ---
   getTasks: () => APIGateway.request('GET', '/tasks'),
   createTask: (task) => APIGateway.request('POST', '/tasks', task),
   updateTask: (id, data) => APIGateway.request('PUT', `/tasks/${id}`, data),
   deleteTask: (id) => APIGateway.request('DELETE', `/tasks/${id}`),
+  getTask: (id) => APIGateway.request('GET', `/tasks/${id}`),
 
-  // --- AI Endpoints (Bedrock) ---
+  // --- AI Endpoints (→ Lambda → DynamoDB) ---
   aiParse: (input) => APIGateway.request('POST', '/ai/parse', { input }),
   aiDecompose: (taskId) => APIGateway.request('POST', `/ai/decompose/${taskId}`),
-  aiRebalance: (tasks) => APIGateway.request('POST', '/ai/rebalance', { tasks }),
+  aiRebalance: () => APIGateway.request('POST', '/ai/rebalance'),
 
-  // --- Textract ---
-  textractUpload: (fileBase64, filename) =>
-    APIGateway.request('POST', '/upload/textract', { file: fileBase64, filename }),
-
-  // --- User ---
-  getProfile: () => APIGateway.request('GET', '/user'),
-  updateProfile: (data) => APIGateway.request('PUT', '/user', data),
+  // --- Notification Endpoints (→ Lambda → DynamoDB + SNS) ---
+  checkNotifications: () => APIGateway.request('POST', '/notifications/check'),
+  subscribeEmail: (email) => APIGateway.request('POST', '/notifications/subscribe', { email }),
 };
 
 export default APIGateway;

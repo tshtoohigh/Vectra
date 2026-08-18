@@ -1,48 +1,75 @@
 /**
- * Amazon Bedrock AI Service
+ * Amazon Bedrock AI Service (via Lambda)
  *
- * Integrates with Anthropic Claude via Amazon Bedrock for:
- * 1. Natural Language Task Parsing
- * 2. Task Decomposition into Sub-Milestones
- * 3. AI Study Planner / Workload Rebalancing
+ * When API Gateway is configured:
+ *   All AI operations go through API Gateway → Lambda → DynamoDB
+ *   The Lambda function processes tasks server-side (real AWS compute).
  *
- * Production: Uses @aws-sdk/client-bedrock-runtime InvokeModelCommand
- * Demo: Intelligent mock responses simulating Claude's behavior
+ * When API Gateway is NOT configured:
+ *   Falls back to client-side mock logic (demo mode).
+ *
+ * Note: Bedrock itself is blocked in Learner Lab, so the Lambda uses
+ * rule-based intelligence. The important thing is the processing happens
+ * on REAL AWS infrastructure (Lambda reading/writing DynamoDB), not
+ * in the browser.
  */
 
+import { APIGateway } from './apiGateway.js';
 import { shortId } from '../../utils/id.js';
-
-const MODEL_ID = 'anthropic.claude-3-haiku-20240307-v1:0';
 
 export const BedrockClient = {
   /**
    * Parse natural language input into structured task JSON
-   * Example: "Database assignment worth 30% due next Friday 11:59 PM taking 6h"
-   * → { title, moduleCode, taskType, deadline, weightage, hours }
+   * → Calls Lambda via API Gateway (real server-side processing)
    */
   async parseNaturalLanguage(input) {
-    // In production:
-    // const client = new BedrockRuntimeClient({ region: 'us-east-1' });
-    // const cmd = new InvokeModelCommand({ modelId: MODEL_ID, body: JSON.stringify({...}) });
-    // const res = await client.send(cmd);
-
-    // Mock AI parsing with regex intelligence
+    if (APIGateway.isConfigured()) {
+      try {
+        const result = await APIGateway.aiParse(input);
+        console.log('[Bedrock/Lambda] Server-side parse result:', result);
+        return result;
+      } catch (err) {
+        console.warn('[Bedrock/Lambda] Parse failed, using local fallback:', err.message);
+      }
+    }
+    // Fallback: local mock parsing
     return _mockParse(input);
   },
 
   /**
    * Decompose a task into 3-5 actionable sub-milestones
+   * → Calls Lambda which reads from DynamoDB, generates milestones,
+   *   writes them back to DynamoDB, and returns the result.
    */
   async decomposeTask(task) {
-    // In production: sends task details to Bedrock, gets structured breakdown
+    if (APIGateway.isConfigured()) {
+      try {
+        const result = await APIGateway.aiDecompose(task.id);
+        console.log('[Bedrock/Lambda] Server-side decompose result:', result);
+        return result;
+      } catch (err) {
+        console.warn('[Bedrock/Lambda] Decompose failed, using local fallback:', err.message);
+      }
+    }
+    // Fallback: local mock
     return _mockDecompose(task);
   },
 
   /**
    * Generate AI study plan / rebalance overloaded days
+   * → Calls Lambda which queries ALL tasks from DynamoDB and analyzes workload
    */
   async rebalanceWorkload(tasks, dailyHours = 4) {
-    // In production: analyzes all tasks and redistributes work across available days
+    if (APIGateway.isConfigured()) {
+      try {
+        const result = await APIGateway.aiRebalance();
+        console.log('[Bedrock/Lambda] Server-side rebalance result:', result);
+        return result;
+      } catch (err) {
+        console.warn('[Bedrock/Lambda] Rebalance failed, using local fallback:', err.message);
+      }
+    }
+    // Fallback: local mock
     return _mockRebalance(tasks, dailyHours);
   },
 
@@ -54,31 +81,26 @@ export const BedrockClient = {
   },
 };
 
-// === MOCK IMPLEMENTATIONS ===
+// === LOCAL FALLBACK IMPLEMENTATIONS (used when API is not configured) ===
 
 function _mockParse(input) {
   const lower = input.toLowerCase();
 
-  // Task type detection
   let taskType = 'Assignment';
   if (lower.match(/\b(test|quiz|exam|midterm|final)\b/)) taskType = 'Test';
   else if (lower.match(/\b(project|prototype|capstone)\b/)) taskType = 'Project';
   else if (lower.match(/\b(presentation|present|pitch|demo)\b/)) taskType = 'Presentation';
   else if (lower.match(/\b(practical|lab|experiment|workshop)\b/)) taskType = 'Practical';
 
-  // Extract weightage
   const weightMatch = input.match(/(?:worth|weight|weightage)?\s*(\d+)\s*%/i);
   const weightage = weightMatch ? parseInt(weightMatch[1]) : null;
 
-  // Extract module code (2-4 letters + 3-4 digits)
   const moduleMatch = input.match(/\b([A-Z]{2,4}\s?\d{3,4})\b/i);
   const moduleCode = moduleMatch ? moduleMatch[1].replace(/\s/g, '').toUpperCase() : '';
 
-  // Extract hours
   const hoursMatch = input.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)\b/i);
   const hours = hoursMatch ? parseFloat(hoursMatch[1]) : null;
 
-  // Extract deadline
   let deadline = null;
   const now = new Date();
   if (lower.includes('tomorrow')) {
@@ -101,27 +123,8 @@ function _mockParse(input) {
     d.setDate(d.getDate() + 7);
     d.setHours(23, 59, 0, 0);
     deadline = d.toISOString();
-  } else if (lower.match(/in\s+(\d+)\s+days?/)) {
-    const days = parseInt(lower.match(/in\s+(\d+)\s+days?/)[1]);
-    const d = new Date(now);
-    d.setDate(d.getDate() + days);
-    d.setHours(23, 59, 0, 0);
-    deadline = d.toISOString();
   }
 
-  // Time extraction (11:59 PM, 23:59, etc.)
-  const timeMatch = input.match(/(\d{1,2})[:\.](\d{2})\s*(am|pm)?/i);
-  if (timeMatch && deadline) {
-    let hours24 = parseInt(timeMatch[1]);
-    const mins = parseInt(timeMatch[2]);
-    if (timeMatch[3]?.toLowerCase() === 'pm' && hours24 < 12) hours24 += 12;
-    if (timeMatch[3]?.toLowerCase() === 'am' && hours24 === 12) hours24 = 0;
-    const d = new Date(deadline);
-    d.setHours(hours24, mins, 0, 0);
-    deadline = d.toISOString();
-  }
-
-  // Extract title (heuristic: remove recognized patterns)
   let title = input
     .replace(/\b(due|by|before|on|at|worth|weight|weightage|taking|about|around)\b.*$/gi, '')
     .replace(/\b[A-Z]{2,4}\s?\d{3,4}\b/gi, '')
@@ -141,6 +144,7 @@ function _mockParse(input) {
     weightage,
     hours,
     confidence: 0.85,
+    source: 'local (API not configured)',
     _rawInput: input,
   };
 }
@@ -200,19 +204,14 @@ function _mockDecompose(task) {
       done: false,
       dueDate: new Date(Date.now() + (i + 1) * (daysAvailable / numSteps) * 86400000).toISOString(),
     })),
-    reasoning: `Breaking "${task.title}" into ${numSteps} manageable milestones over ${daysAvailable} days. Each step takes ~${hoursPerStep}h, distributing the ${totalHours}h workload evenly to prevent last-minute cramming.`,
+    reasoning: `Breaking "${task.title}" into ${numSteps} manageable milestones over ${daysAvailable} days. Each step takes ~${hoursPerStep}h. (Local fallback — connect API for server-side processing.)`,
   };
 }
 
 function _mockRebalance(tasks, dailyHours) {
   const activeTasks = tasks.filter((t) => t.status !== 'Completed');
-  const heaviestDay = activeTasks.reduce((worst, t) => {
-    const day = new Date(t.deadline).toLocaleDateString('en', { weekday: 'long' });
-    return day || worst;
-  }, 'later this week');
-
   return {
-    suggestion: `You have ${activeTasks.length} things due soon and some days are packed tighter than others. Try moving any prep work you can to earlier, lighter days — even just an hour of reading or outlining on Thursday means less pressure over the weekend. Start with whatever carries the most grade weight.`,
+    suggestion: `You have ${activeTasks.length} active tasks. Connect the API Gateway for real server-side workload analysis from DynamoDB.`,
     redistributed: activeTasks.map((t) => ({ ...t, _aiNote: 'Consider starting earlier' })),
   };
 }
@@ -228,9 +227,7 @@ function _mockExplain(task, allTasks) {
       Math.abs(new Date(t.deadline).getTime() - new Date(task.deadline).getTime()) < 72 * 3600000,
   );
 
-  // Natural, student-friendly explanation
   let msg = `Worth ${task.weightage || 10}% of your grade with about ${needed}h of work left and ${daysLeft} days to go.`;
-
   if (conflicts.length > 0) {
     const names = conflicts
       .slice(0, 2)

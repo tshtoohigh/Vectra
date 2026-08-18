@@ -1,17 +1,18 @@
 /**
  * Amazon SNS / SES Notification Service
  *
- * Delivers urgent push notifications (SNS) and daily digest emails (SES)
- * when tasks enter critical risk states.
+ * When API Gateway is configured:
+ *   - checkAndNotify() calls the real Lambda which scans DynamoDB and
+ *     publishes to the SNS topic (sends real emails to subscribers)
+ *   - subscribe() adds an email to the SNS topic
  *
- * Trigger conditions:
- * - Time Remaining < 48 hours AND Progress < 40% AND Weightage > 20%
- * - Task overdue (any)
- * - Workload exceeds daily capacity
+ * When API Gateway is NOT configured:
+ *   - Falls back to browser-side notification queue (demo mode)
  *
- * Production: @aws-sdk/client-sns PublishCommand, @aws-sdk/client-ses SendEmailCommand
- * Demo: Browser toast notifications + notification queue
+ * Real flow: Frontend → API Gateway → Lambda → DynamoDB scan → SNS Publish → Email
  */
+
+import { APIGateway } from './apiGateway.js';
 
 let notificationQueue = [];
 let notificationCallbacks = [];
@@ -28,9 +29,69 @@ export const SNSNotifier = {
   },
 
   /**
-   * Check all tasks and generate notifications for critical ones
+   * Check all tasks and generate notifications for critical ones.
+   * When API is configured: calls Lambda which reads DynamoDB and publishes to SNS.
    */
-  checkAndNotify(tasks) {
+  async checkAndNotify(tasks) {
+    // If real API is configured, use the Lambda-based checker
+    if (APIGateway.isConfigured()) {
+      try {
+        const result = await APIGateway.checkNotifications();
+        console.log('[SNS/Lambda] Real deadline check result:', result);
+
+        if (result?.alerts?.length) {
+          const newNotifs = result.alerts.map((alert) => ({
+            id: alert.id,
+            type: alert.severity,
+            service: alert.severity === 'overdue' ? 'SES' : 'SNS',
+            title: alert.title,
+            message: alert.message,
+            task: { id: alert.taskId },
+            timestamp: alert.timestamp,
+            _source: 'Lambda + DynamoDB + SNS (real AWS)',
+          }));
+
+          // Deduplicate
+          const existing = new Set(notificationQueue.map((n) => n.id));
+          const fresh = newNotifs.filter((n) => !existing.has(n.id));
+
+          if (fresh.length > 0) {
+            notificationQueue = [...fresh, ...notificationQueue].slice(0, 20);
+            notificationCallbacks.forEach((cb) => cb(fresh));
+          }
+          return fresh;
+        }
+        return [];
+      } catch (err) {
+        console.warn('[SNS/Lambda] Check failed, using local fallback:', err.message);
+      }
+    }
+
+    // Fallback: local notification logic
+    return this._localCheck(tasks);
+  },
+
+  /**
+   * Subscribe an email to real SNS notifications
+   */
+  async subscribe(email) {
+    if (APIGateway.isConfigured()) {
+      try {
+        const result = await APIGateway.subscribeEmail(email);
+        console.log('[SNS] Subscription result:', result);
+        return result;
+      } catch (err) {
+        console.error('[SNS] Subscribe failed:', err.message);
+        throw err;
+      }
+    }
+    return { message: 'API not configured. Set VITE_API_URL to enable real SNS emails.' };
+  },
+
+  /**
+   * Local fallback notification check (when API not configured)
+   */
+  _localCheck(tasks) {
     const now = Date.now();
     const newNotifs = [];
 
@@ -41,7 +102,6 @@ export const SNSNotifier = {
       const progress = task.progress || 0;
       const weightage = task.weightage || 10;
 
-      // CRITICAL: Due in < 48h AND progress < 40% AND weightage > 20%
       if (hoursRemaining > 0 && hoursRemaining < 48 && progress < 40 && weightage > 20) {
         newNotifs.push({
           id: `notif_${task.id}_critical`,
@@ -54,7 +114,6 @@ export const SNSNotifier = {
         });
       }
 
-      // URGENT: Due in < 24h
       if (hoursRemaining > 0 && hoursRemaining < 24 && progress < 80) {
         newNotifs.push({
           id: `notif_${task.id}_urgent`,
@@ -67,7 +126,6 @@ export const SNSNotifier = {
         });
       }
 
-      // OVERDUE
       if (hoursRemaining <= 0) {
         newNotifs.push({
           id: `notif_${task.id}_overdue`,
@@ -81,7 +139,6 @@ export const SNSNotifier = {
       }
     });
 
-    // Deduplicate
     const existing = new Set(notificationQueue.map((n) => n.id));
     const fresh = newNotifs.filter((n) => !existing.has(n.id));
 
@@ -115,10 +172,14 @@ export const SNSNotifier = {
   },
 
   /**
-   * Simulate sending email digest (SES)
+   * Send daily digest (via Lambda + SNS when configured)
    */
   async sendDailyDigest(tasks, userEmail) {
-    // Production: SES SendEmailCommand
+    if (APIGateway.isConfigured()) {
+      // The EventBridge scheduled rule handles this automatically
+      console.log('[SNS] Daily digest handled by EventBridge → Lambda → SNS');
+      return { messageId: 'handled_by_eventbridge', sent: true };
+    }
     console.log(`[SES] Daily digest would be sent to ${userEmail} with ${tasks.length} tasks`);
     return { messageId: 'ses_' + Date.now(), sent: true };
   },
