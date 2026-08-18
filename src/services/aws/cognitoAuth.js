@@ -65,6 +65,15 @@ export const CognitoAuth = {
     if (isAWSConfigured()) {
       await DynamoClient.putProfile(email, user);
       console.log(`[DynamoDB] User profile created: USER#${email}`);
+
+      // Subscribe user's email to SNS for deadline alerts
+      try {
+        const { SNSNotifier } = await import('./snsNotifier.js');
+        await SNSNotifier.subscribe(email);
+        console.log(`[SNS] Auto-subscribed ${email} to deadline alerts`);
+      } catch (err) {
+        console.warn('[SNS] Auto-subscribe failed:', err.message);
+      }
     } else {
       // Fallback: localStorage
       const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
