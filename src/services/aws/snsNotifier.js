@@ -1,12 +1,13 @@
 /**
- * SNS Notification Service — Calls Netlify Functions (server-side)
+ * SNS Notification Service — Per-User Alerts
  *
- * All SNS operations go through /.netlify/functions/sns
- * This keeps AWS credentials on the server.
+ * Each user has their OWN SNS topic. Alerts go ONLY to the user
+ * whose task is at risk — not to everyone.
  *
- * The Netlify function uses:
- *   PublishCommand — sends real email alerts
- *   SubscribeCommand — adds email to topic
+ * Flow:
+ *   User signs up → creates personal SNS topic → subscribes their email
+ *   Task becomes critical → publishes ONLY to that user's topic
+ *   Only THAT user gets the email
  */
 
 import { callSNS, isAWSConfigured } from './awsConfig.js';
@@ -22,8 +23,24 @@ export const SNSNotifier = {
   },
 
   /**
+   * Create a personal SNS topic for a user (called on sign-up)
+   * SNS Operations: CreateTopicCommand + SubscribeCommand
+   */
+  async subscribe(email) {
+    if (!isAWSConfigured()) return { message: 'AWS not configured' };
+    try {
+      const result = await callSNS('createUserTopic', { email });
+      console.log(`[SNS] Created personal topic for ${email}`);
+      return result;
+    } catch (err) {
+      console.error('[SNS] Subscribe failed:', err.message);
+      throw err;
+    }
+  },
+
+  /**
    * Check tasks and send SNS notifications for critical deadlines
-   * Reads from DynamoDB (via Netlify function), analyzes, publishes to SNS
+   * Publishes ONLY to the specific user's topic (their email)
    */
   async checkAndNotify(tasks, userId) {
     const now = Date.now();
@@ -66,13 +83,14 @@ export const SNSNotifier = {
       notificationQueue = [...fresh, ...notificationQueue].slice(0, 20);
       notificationCallbacks.forEach(cb => cb(fresh));
 
-      // Publish to real SNS (server-side)
-      if (isAWSConfigured()) {
+      // Publish to the USER'S PERSONAL SNS topic (only they get the email)
+      if (isAWSConfigured() && userId) {
         try {
           const subject = `Vectra Alert: ${fresh.length} deadline(s) need attention`;
           const message = fresh.map(a => `[${a.type.toUpperCase()}] ${a.message}`).join('\n\n');
-          await callSNS('publish', { subject, message });
-          console.log('[SNS] PublishCommand: alert sent');
+          // userId IS the user's email — publish to their personal topic
+          await callSNS('publish', { email: userId, subject, message });
+          console.log(`[SNS] PublishCommand: alert sent to ${userId}'s personal topic`);
         } catch (err) {
           console.warn('[SNS] Publish failed:', err.message);
         }
@@ -80,22 +98,6 @@ export const SNSNotifier = {
     }
 
     return fresh;
-  },
-
-  /**
-   * Subscribe email to SNS topic
-   * Server: SNS SubscribeCommand
-   */
-  async subscribe(email) {
-    if (!isAWSConfigured()) return { message: 'AWS not configured' };
-    try {
-      const result = await callSNS('subscribe', { email });
-      console.log(`[SNS] SubscribeCommand: ${email}`);
-      return result;
-    } catch (err) {
-      console.error('[SNS] Subscribe failed:', err.message);
-      throw err;
-    }
   },
 
   getNotifications() { return notificationQueue; },
@@ -108,7 +110,7 @@ export const SNSNotifier = {
     const message = `Vectra Daily Digest\n\nActive tasks: ${active.length}\n\n` +
       active.slice(0, 5).map(t => `• ${t.title} (${t.progress || 0}% done)`).join('\n');
     try {
-      const result = await callSNS('publish', { subject: 'Vectra Daily Digest', message });
+      const result = await callSNS('publish', { email: userEmail, subject: 'Vectra Daily Digest', message });
       return { messageId: result.messageId, sent: true };
     } catch (err) {
       return { sent: false };
