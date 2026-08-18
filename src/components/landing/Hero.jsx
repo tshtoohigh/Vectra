@@ -45,7 +45,7 @@ export default function Hero() {
           </h1>
 
           <p className="mx-auto mt-5 max-w-2xl text-base leading-relaxed text-slate-600 sm:text-lg dark:text-slate-400">
-            PolyTrack keeps every assignment, test and project deadline in one place — then works
+            Vectra keeps every assignment, test and project deadline in one place — then works
             out what actually deserves your attention tonight, based on grade weight, effort left
             and how packed your week already is.
           </p>

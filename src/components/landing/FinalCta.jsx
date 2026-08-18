@@ -17,7 +17,7 @@ export default function FinalCta() {
               Start the semester ahead of it
             </h2>
             <p className="mt-4 text-base leading-relaxed text-brand-50">
-              Add your deadlines once and let PolyTrack handle the ordering. Free for students, no
+              Add your deadlines once and let Vectra handle the ordering. Free for students, no
               card required.
             </p>
 

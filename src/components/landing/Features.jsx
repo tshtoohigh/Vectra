@@ -48,7 +48,7 @@ export default function Features() {
           <p className="eyebrow">Features</p>
           <h2 className="heading-section mt-2">Deadline tracking that actually helps you decide</h2>
           <p className="mt-4 text-base text-slate-600 dark:text-slate-400">
-            A calendar tells you when things are due. PolyTrack tells you what to do about it.
+            A calendar tells you when things are due. Vectra tells you what to do about it.
           </p>
         </div>
 

@@ -6,7 +6,7 @@ const STEPS = [
     n: '01',
     Glyph: Icon.Plus,
     title: 'Add your deadlines',
-    body: 'Type them in, paste a sentence in plain English, or upload the assignment brief and let PolyTrack read it.',
+    body: 'Type them in, paste a sentence in plain English, or upload the assignment brief and let Vectra read it.',
     detail: 'Module, type, due date, weighting and rough effort — that is all it needs.',
   },
   {

@@ -2,7 +2,7 @@ import React from 'react';
 import { Icon } from '../ui/index.js';
 
 /**
- * Static, non-interactive representation of the PolyTrack dashboard.
+ * Static, non-interactive representation of the Vectra dashboard.
  * Used inside the hero so visitors see the real product shape immediately.
  */
 
@@ -83,7 +83,7 @@ export default function ProductMockup() {
         <span className="h-2.5 w-2.5 rounded-full bg-slate-300 dark:bg-slate-700" />
         <div className="ml-2 flex-1">
           <div className="mx-auto w-fit rounded-md border border-slate-200 bg-white px-2.5 py-0.5 text-[10px] font-medium text-slate-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-500">
-            app.polytrack.io/dashboard
+            app.vectra.io/dashboard
           </div>
         </div>
       </div>
@@ -95,7 +95,7 @@ export default function ProductMockup() {
             <span className="flex h-5 w-5 items-center justify-center rounded bg-brand-600 text-white">
               <Icon.Logo className="h-3.5 w-3.5" strokeWidth={2.25} />
             </span>
-            <span className="text-xs font-bold text-slate-900 dark:text-white">PolyTrack</span>
+            <span className="text-xs font-bold text-slate-900 dark:text-white">Vectra</span>
           </div>
           <div className="space-y-0.5">
             {NAV.map(({ label, Glyph, active }) => (

@@ -40,7 +40,7 @@ export default function LandingNav() {
               <Icon.Logo className="h-5 w-5" strokeWidth={2} />
             </span>
             <span className="text-lg font-extrabold tracking-tight text-slate-900 dark:text-white">
-              PolyTrack
+              Vectra
             </span>
           </Link>
 

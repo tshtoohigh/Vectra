@@ -126,11 +126,11 @@ export const SNSNotifier = {
    * This sends REAL emails to anyone subscribed to the topic
    */
   async _publishToSNS(alerts) {
-    const subject = `PolyTrack Alert: ${alerts.length} deadline(s) need attention`;
+    const subject = `Vectra Alert: ${alerts.length} deadline(s) need attention`;
 
     const lines = [
       '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
-      '  PolyTrack Deadline Alert',
+      '  Vectra Deadline Alert',
       '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
       '',
     ];
@@ -144,7 +144,7 @@ export const SNSNotifier = {
 
     lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     lines.push(`Checked at: ${new Date().toISOString()}`);
-    lines.push('Open PolyTrack to manage your deadlines.');
+    lines.push('Open Vectra to manage your deadlines.');
 
     try {
       const result = await snsClient.send(new PublishCommand({
@@ -258,7 +258,7 @@ export const SNSNotifier = {
     try {
       const result = await snsClient.send(new PublishCommand({
         TopicArn: SNS_TOPIC_ARN,
-        Subject: `PolyTrack Daily Digest — ${dueSoon.length} tasks due soon`,
+        Subject: `Vectra Daily Digest — ${dueSoon.length} tasks due soon`,
         Message: message,
       }));
       console.log(`[SNS] ✓ Daily digest published. MessageId: ${result.MessageId}`);

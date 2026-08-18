@@ -40,7 +40,7 @@ async function callAI(messages, temperature = 0.7) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
       'HTTP-Referer': window.location.origin,
-      'X-Title': 'PolyTrack Academic Planner',
+      'X-Title': 'Vectra Academic Planner',
     },
     body: JSON.stringify({
       model: MODEL,

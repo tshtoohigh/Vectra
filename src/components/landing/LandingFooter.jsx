@@ -41,7 +41,7 @@ export default function LandingFooter() {
                 <Icon.Logo className="h-5 w-5" strokeWidth={2} />
               </span>
               <span className="text-lg font-extrabold tracking-tight text-slate-900 dark:text-white">
-                PolyTrack
+                Vectra
               </span>
             </Link>
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-slate-600 dark:text-slate-400">
@@ -89,7 +89,7 @@ export default function LandingFooter() {
 
         <div className="mt-10 flex flex-col items-center justify-between gap-3 border-t border-slate-200 pt-6 sm:flex-row dark:border-slate-800">
           <p className="text-xs text-slate-500 dark:text-slate-500">
-            © {new Date().getFullYear()} PolyTrack. Built for students.
+            © {new Date().getFullYear()} Vectra. Built for students.
           </p>
           <p className="text-xs text-slate-400 dark:text-slate-600">
             Cognito · API Gateway · Lambda · DynamoDB · Bedrock · Textract · EventBridge · SNS

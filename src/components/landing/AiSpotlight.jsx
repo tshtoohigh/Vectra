@@ -38,7 +38,7 @@ export default function AiSpotlight() {
               Recommendations you can argue with — because you can see the reasoning
             </h2>
             <p className="mt-4 text-base leading-relaxed text-slate-600 dark:text-slate-400">
-              PolyTrack never just says “do this next”. Every suggestion cites the numbers behind
+              Vectra never just says “do this next”. Every suggestion cites the numbers behind
               it: how much the task is worth, how many hours are left, and what else is competing
               for the same evening.
             </p>
@@ -85,7 +85,7 @@ export default function AiSpotlight() {
             {/* Output */}
             <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-card dark:border-slate-800 dark:bg-slate-900">
               <div className="mb-3 flex items-center justify-between">
-                <p className="label">PolyTrack creates</p>
+                <p className="label">Vectra creates</p>
                 <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
                   <Icon.CircleCheck className="h-3.5 w-3.5" />
                   92% confidence
