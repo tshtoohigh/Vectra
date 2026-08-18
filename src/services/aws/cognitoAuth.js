@@ -108,6 +108,15 @@ export const CognitoAuth = {
         throw new Error('Invalid password');
       }
       console.log(`[DynamoDB] User signed in: USER#${email}`);
+
+      // Ensure SNS subscription exists (re-sends confirmation if not yet confirmed)
+      try {
+        const { SNSNotifier } = await import('./snsNotifier.js');
+        await SNSNotifier.subscribe(email);
+        console.log(`[SNS] Ensured subscription for ${email}`);
+      } catch (err) {
+        console.warn('[SNS] Subscribe on login failed:', err.message);
+      }
     } else {
       // Fallback: localStorage
       const users = JSON.parse(localStorage.getItem('pt_users') || '{}');
