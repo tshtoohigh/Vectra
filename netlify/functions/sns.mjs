@@ -8,15 +8,15 @@
 import { SNSClient, PublishCommand, SubscribeCommand, ListSubscriptionsByTopicCommand } from '@aws-sdk/client-sns';
 
 const snsClient = new SNSClient({
-  region: process.env.AWS_REGION || 'us-east-1',
+  region: process.env.MY_AWS_REGION || 'us-east-1',
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    sessionToken: process.env.AWS_SESSION_TOKEN,
+    accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY,
+    sessionToken: process.env.MY_AWS_SESSION_TOKEN,
   },
 });
 
-const TOPIC_ARN = process.env.SNS_TOPIC_ARN || 'arn:aws:sns:us-east-1:037389780625:PolyTrackAlerts';
+const TOPIC_ARN = process.env.MY_SNS_TOPIC_ARN || 'arn:aws:sns:us-east-1:037389780625:PolyTrackAlerts';
 
 function respond(statusCode, body) {
   return {
