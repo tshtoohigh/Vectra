@@ -14,7 +14,7 @@
  */
 
 import { DynamoClient } from './dynamoClient.js';
-import { isAWSConfigured } from './awsConfig.js';
+import { isAWSConfigured, callSNS } from './awsConfig.js';
 import { shortId } from '../../utils/id.js';
 
 let currentSession = null;
@@ -68,8 +68,7 @@ export const CognitoAuth = {
 
       // Subscribe user's email to SNS for deadline alerts
       try {
-        const { SNSNotifier } = await import('./snsNotifier.js');
-        await SNSNotifier.subscribe(email);
+        await callSNS('createUserTopic', { email });
         console.log(`[SNS] Auto-subscribed ${email} to deadline alerts`);
       } catch (err) {
         console.warn('[SNS] Auto-subscribe failed:', err.message);
@@ -111,8 +110,7 @@ export const CognitoAuth = {
 
       // Ensure SNS subscription exists (re-sends confirmation if not yet confirmed)
       try {
-        const { SNSNotifier } = await import('./snsNotifier.js');
-        await SNSNotifier.subscribe(email);
+        await callSNS('createUserTopic', { email });
         console.log(`[SNS] Ensured subscription for ${email}`);
       } catch (err) {
         console.warn('[SNS] Subscribe on login failed:', err.message);
